@@ -1,0 +1,321 @@
+---
+title: "Consumer Grocery Shopping Behavior Survey"
+author: "Kelly Zhang"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Introduction
+
+The goal of this study is to understand the tradeoffs that consumers are willing to make when they are grocery shopping. Specifically, it aims to investigate factors such as price differences, travel distance, and convenience that could potentially influence purchasing decisions. For example, if consumers need to buy multiple items, will they choose to purchase all items at a single store despite higher prices or travel to another store to benefit from lower prices? Insights from this survey will help retailers and economists understand consumer behavior better, potentially informing pricing strategies and store placement decisions.
+
+**Data Collection:**
+Data was collected through Prolific and targeting adults who are responsible for grocery shopping in their households. The survey included questions designed to analyze means, proportions, and correlations, such as:
+- Multiple-choice questions to understand preferences (e.g., "Would you buy watermelons at $12.99 at Walmart or drive to Costco to buy them at a price of $8.99?")
+- Likert scale questions to measure the importance of different factors (e.g., "On a scale of 1 to 5, how important is price when making a grocery shopping decision?")
+- Ranking questions to prioritize factors influencing decisions (e.g., "Rank the following factors from most to least important: price, distance, convenience, brand loyalty.")
+- Demographic questions to gather socio-demographic information (e.g., age, gender, income level, geographic location)
+
+The survey aimed to be representative of the broader population to ensure generalizability of the results. Note that in the ranking questions of this datafile, participant are showing their rankings specifically to each question - such as their intended importance of "payment type - credit card" each result shows their ranking from 1-5 specifically for credit cards usage in grocery stores, and same things apply to debit cards, apple pay, etc.
+
+**Included Data Files:**
+Prior to this data analysis, the researcher Kelly have already done simple cleanning of the data files from the files directly downloaded from Qualtrics survey results - `survey_responses.csv`: Contains the raw survey responses, including answers to multiple-choice, Likert scale, ranking, and demographic questions. Data cleannings including dropping irrelevant columns and rows like "IP Address", "Survey Preview", "StartDate", etc.
+
+In this survey, we will be using the pre-cleanned version of the dataset:
+- `cleaned.csv`: A cleaned version of the survey responses with missing values handled and irrelevant columns removed, handled a transformation from questions to simplified titles.
+
+## Libraries block loading any needed R/Python libraries
+
+### Handle Conflicts
+```{r}
+options(conflicts.policy = "depends.ok")
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/fun_ml.R?raw=true")
+tidymodels_conflictRules()
+conflictRules("Matrix", mask.ok = c("expand", "pack", "unpack"))
+```
+
+### Load Packages
+```{r,include=FALSE}
+library(cowplot, include.only = c("plot_grid", "theme_half_open"))
+library(tidyverse)
+library(tidymodels)
+library(ranger)
+library(xfun, include.only = "cache_rds")
+library(rsample)
+library(discrim, exclude = "smoothness")
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+```
+
+### Source function scripts
+```{r}
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/fun_plots.R?raw=true")
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/fun_eda.R?raw=true")
+```
+
+### Specify global settings
+Since we are going to use cache_rds(), we are also going to include rerun_setting <- FALSE in this chunk
+```{r}
+theme_set(theme_classic())
+options(tibble.width = Inf, dplyr.print_max=Inf)
+rerun_setting <- FALSE
+```
+
+### Set up parallel processing
+Note you can type cl into your console to see how many cores your computer has.
+```{r}
+cl <- parallel::makePSOCKcluster(parallel::detectCores(logical = FALSE))
+doParallel::registerDoParallel(cl)
+```
+
+## Read-in data
+```{r}
+d <- readr::read_csv("cleaned.csv")
+glimpse(d)
+car::some(d)
+```
+
+```{r}
+# light cleaning EDA
+d <- d |> 
+  janitor::clean_names("snake") |>
+  mutate(across(where(is.character), factor)) |>
+  mutate(across(where(is.character), tidy_responses)) |>
+  glimpse()
+```
+
+```{r}
+# check if there are missing data
+d |> 
+  skim_some()
+# Payment section have 1 missing data
+```
+
+### Distribution Plots for key variables
+```{r}
+# Income Distribution
+ggplot(d, aes(x = income)) + 
+  geom_histogram(binwidth = 8000) +
+  ggtitle("Income Distribution") +
+  xlab("Income")+
+  scale_x_continuous(labels = comma) +
+  theme_minimal()
+
+# we see most of the income were above 80000 per year
+```
+
+```{r}
+# Store Preference Distribution
+ggplot(d, aes(x = frequency)) + 
+  geom_bar(fill='lightblue') +
+  ggtitle("Store shopping frequency") +
+  xlab("Store frequency")
+
+# we see only 1-2 participant shops less than once a month.
+```
+
+```{r}
+# living area Distribution
+ggplot(d, aes(x = living_area)) + 
+  geom_bar(fill='lightblue') +
+  ggtitle('Living Area Distribution of Respondents') +
+  xlab("Living Area")
+# Mostly urban and suburban
+```
+
+```{r}
+# Employment Status Distribution
+ggplot(d, aes(x = employment)) + 
+  geom_bar(fill='lightblue') +
+  ggtitle('employment Distribution of Respondents') +
+  xlab("Employment Status")
+# Mostly Full/Part time
+```
+
+```{r}
+# Education Level Distribution
+ggplot(d, aes(x = education)) + 
+  geom_bar(fill='lightblue') +
+  ggtitle('Education Distribution of Respondents') +
+  xlab("Education Status")
+# Master degress or some college but no degree
+```
+
+```{r}
+# Correlation Analysis
+correlation_matrix <- d %>% 
+  select_if(is.numeric) %>% 
+  cor(use = "complete.obs")
+
+# Visualize the correlation matrix
+corrplot(correlation_matrix, method = "circle")
+
+# we see some outstanding relationship between store loyalty and store distance.
+# scale_member have strong correlation with scale_promo
+# scale_distance have strong correlation with payment_afterpay - but why?
+```
+
+# Exploring correlations and siginifiant relationships
+### Logistic Regression
+```{r}
+# Convert the response variable to binary
+d$primary_shopper <- ifelse(d$primary_shopper == "Yes", 1, 0)
+table(d$primary_shopper)
+# Logistic regression model
+logit_model <- glm(primary_shopper ~ income + age + household_size, data = d, family = binomial)
+summary(logit_model)
+
+# ANOVA for the logistic regression model
+car::Anova(logit_model, type = 3)
+```
+
+### Regularized Logistic Regression
+Using the glmnet package for Lasso (L1) or Ridge (L2) regularization.
+```{r}
+# Load necessary library
+library(glmnet)
+
+# Prepare the data
+x <- model.matrix(primary_shopper ~ income + age + household_size + employment, data = d)[, -1]
+y <- d$primary_shopper
+
+# Fit Lasso (L1) regularized logistic regression
+lasso_model <- cv.glmnet(x, y, family = "binomial", alpha = 1)
+plot(lasso_model)
+coef(lasso_model, s = "lambda.min")
+
+# Fit Ridge (L2) regularized logistic regression
+ridge_model <- cv.glmnet(x, y, family = "binomial", alpha = 0)
+plot(ridge_model)
+coef(ridge_model, s = "lambda.min")
+```
+
+### Using Firth's Bias-Reduced Logistic Regression
+```{r}
+# Load logistf package to handle separation issues
+library(logistf)
+
+# Firth's bias-reduced logistic regression model
+firth_model <- logistf(primary_shopper ~ income + age + household_size + employment, data = d)
+summary(firth_model)
+
+```
+
+## Linear Regression
+### Linear Regression with Interaction Terms
+Including interaction terms to see if the effect of one predictor variable depends on the level of another predictor variable.
+```{r}
+# Linear regression with interaction terms
+interaction_model <- lm(store_quality ~ income * household_size + age, data = d)
+summary(interaction_model)
+```
+
+### Linear Regression for Multiple Outcomes
+Running linear regression for multiple outcome variables at once.
+```{r}
+# Linear regression for multiple outcomes
+multi_model <- lm(cbind(store_quality, store_discount, store_layout) ~ income + age + household_size + employment, data = d)
+summary(multi_model)
+
+# ANOVA for the multiple outcome model
+car::Anova(multi_model, type = 3)
+```
+
+### Plotting Model Diagnostics
+Plotting diagnostic plots to evaluate the assumptions of the linear regression models.
+
+```{r}
+# Diagnostic plots for linear regression model
+par(mfrow = c(2, 2))
+plot(interaction_model)
+```
+
+
+## Spliting data using initial_split
+### I want to predict store_quality's influence towards our customers
+```{r}
+set.seed(123456)
+splits_test <- d |> 
+  initial_split(prop = 2/3, strata = "store_quality")
+
+data_trn <- splits_test |> 
+  analysis()
+
+data_test <- splits_test |> 
+  assessment()
+```
+
+```{r}
+# Recipe
+rec <- recipe(store_quality ~ ., data = data_trn)
+
+rec_prep <- rec |> 
+  prep(data_trn)
+
+feat_trn <- rec_prep |> 
+  bake(NULL)
+
+feat_trn |> skim_some()
+```
+
+```{r}
+set.seed(123456)
+splits_boot <- data_trn |>
+  bootstraps(times = 100, strata = "store_quality")
+
+splits_boot
+```
+
+```{r}
+grid_tree <- grid_regular(cost_complexity(), min_n(), levels = 4)
+
+grid_tree
+```
+
+```{r}
+fits_tree <- 
+  cache_rds(
+  expr = {
+    decision_tree(
+      cost_complexity = tune(),
+      tree_depth = 10,
+      min_n = tune()) |>
+    set_engine("rpart") |>
+    set_mode("regression") |> 
+    tune_grid(preprocessor = rec, 
+              resamples = splits_boot, 
+              grid = grid_tree, 
+              metrics = metric_set(rmse))
+
+  },
+  rerun = rerun_setting,
+  dir = "cache/755",
+  file = "fits_tree")
+```
+
+```{r}
+autoplot(fits_tree)
+```
+
+```{r}
+# Take a look at our best performances
+show_best(fits_tree)
+```
+
+```{r}
+# Best model
+best_decision_tree <-   
+  decision_tree(cost_complexity = select_best(fits_tree)$cost_complexity,
+                tree_depth = 10,
+                min_n = select_best(fits_tree)$min_n
+                ) |>
+  set_engine("rpart", model = TRUE) |>
+  set_mode("regression") |>  
+  fit(store_quality ~ ., data = feat_trn)
+```
+
+```{r}
+best_decision_tree$fit |> rpart.plot::rpart.plot()
+```
+
